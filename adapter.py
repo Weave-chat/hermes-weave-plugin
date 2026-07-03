@@ -393,7 +393,65 @@ class WeaveAdapter(BasePlatformAdapter):
         if session_id:
             self._session_ids[self.chat_id] = session_id
 
-        # 将斜杠命令作为普通消息交给 Agent 处理
+        # 命令名（去掉 / 前缀）
+        cmd_name = command.lstrip("/").lower()
+
+        # /stop, /abort, /cancel — 中断当前会话
+        if cmd_name in ("stop", "abort", "cancel"):
+            session_key = self._build_session_key(self.chat_id)
+            self._interrupt_session(session_key)
+            await self._send_raw({
+                "type": "command_result",
+                "command": command,
+                "request_id": request_id,
+                "session_id": session_id,
+                "success": True,
+                "content": "已停止生成",
+                "side_effects": [{"type": "generation_stopped"}],
+            })
+            logger.info("[Weave] /stop 命令已执行")
+            return
+
+        # /new, /reset — 创建新会话
+        if cmd_name in ("new", "reset"):
+            await self._handle_create_session(data)
+            await self._send_raw({
+                "type": "command_result",
+                "command": command,
+                "request_id": request_id,
+                "session_id": session_id,
+                "success": True,
+                "content": "已创建新会话",
+                "side_effects": [{"type": "session_reset"}],
+            })
+            logger.info("[Weave] /new 命令已执行")
+            return
+
+        # /model (无参数) — 查询当前模型
+        if cmd_name == "model" and not args.strip():
+            try:
+                from hermes_cli.config import load_config
+                cfg = load_config()
+                model_cfg = cfg.get("model", {})
+                model = model_cfg.get("default", "unknown")
+                provider = model_cfg.get("provider", "")
+                content = f"Current: `{model}`"
+                if provider:
+                    content += f" on {provider}"
+                await self._send_raw({
+                    "type": "command_result",
+                    "command": command,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "success": True,
+                    "content": content,
+                })
+                logger.info("[Weave] /model 查询: %s", model)
+                return
+            except Exception as e:
+                logger.warning("[Weave] /model 查询失败: %s, 回退到 AI 处理", e)
+
+        # 其他命令 — 作为普通消息交给 Agent 处理
         full_text = f"{command} {args}".strip() if args else command
         source = self.build_source(
             chat_id=self.chat_id,
