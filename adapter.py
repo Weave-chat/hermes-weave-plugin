@@ -427,17 +427,24 @@ class WeaveAdapter(BasePlatformAdapter):
             logger.info("[Weave] /new 命令已执行")
             return
 
-        # /model (无参数) — 查询当前模型
+        # /model (无参数) — 查询完整模型列表
         if cmd_name == "model" and not args.strip():
             try:
-                from hermes_cli.config import load_config
-                cfg = load_config()
-                model_cfg = cfg.get("model", {})
-                model = model_cfg.get("default", "unknown")
-                provider = model_cfg.get("provider", "")
-                content = f"Current: `{model}`"
-                if provider:
-                    content += f" on {provider}"
+                from hermes_cli.inventory import build_models_payload, load_picker_context
+                ctx = load_picker_context()
+                payload = build_models_payload(ctx, include_unconfigured=True, canonical_order=True)
+
+                model = payload.get("model", "unknown")
+                provider = payload.get("provider", "")
+                lines = [f"Current: `{model}` on {provider}", ""]
+                for p in payload["providers"]:
+                    if p["models"]:
+                        lines.append(f"**{p['name']}** `--{p['slug']}`:")
+                        for m in p["models"]:
+                            lines.append(f"  `{m}`")
+                        lines.append("")
+
+                content = "\n".join(lines)
                 await self._send_raw({
                     "type": "command_result",
                     "command": command,
@@ -446,7 +453,7 @@ class WeaveAdapter(BasePlatformAdapter):
                     "success": True,
                     "content": content,
                 })
-                logger.info("[Weave] /model 查询: %s", model)
+                logger.info("[Weave] /model 查询: %s, providers=%d", model, len(payload["providers"]))
                 return
             except Exception as e:
                 logger.warning("[Weave] /model 查询失败: %s, 回退到 AI 处理", e)
