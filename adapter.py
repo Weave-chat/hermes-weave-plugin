@@ -458,6 +458,43 @@ class WeaveAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[Weave] /model 查询失败: %s, 回退到 AI 处理", e)
 
+        # /model xxx --provider yyy — 切换模型
+        if cmd_name == "model" and args.strip():
+            try:
+                # 通过 Hermes CLI 执行模型切换
+                import subprocess
+                import shutil
+                import shlex
+                hermes_cmd = shutil.which("hermes")
+                if not hermes_cmd:
+                    hermes_cmd = "/Users/wuzhe/.local/bin/hermes"
+                cmd_parts = shlex.split(args)
+                full_cmd = [hermes_cmd, "model"] + cmd_parts + ["--global"]
+                logger.info("[Weave] 执行模型切换: %s", " ".join(full_cmd))
+                proc = await asyncio.create_subprocess_exec(
+                    *full_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env={**os.environ, "PAGER": ""},
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                if proc.returncode == 0:
+                    await self._send_raw({
+                        "type": "command_result",
+                        "command": command,
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "success": True,
+                        "content": f"模型已切换: {args.strip()}",
+                        "side_effects": [{"type": "model_changed", "model": args.strip().split()[0]}],
+                    })
+                    logger.info("[Weave] 模型切换成功: %s", args.strip())
+                    return
+                else:
+                    logger.warning("[Weave] 模型切换失败: %s", stderr.decode("utf-8", errors="replace")[:200])
+            except Exception as e:
+                logger.warning("[Weave] 模型切换异常: %s, 回退到 AI 处理", e)
+
         # 其他命令 — 作为普通消息交给 Agent 处理
         full_text = f"{command} {args}".strip() if args else command
         source = self.build_source(
