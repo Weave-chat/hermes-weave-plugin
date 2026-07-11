@@ -495,7 +495,12 @@ class WeaveAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[Weave] 模型切换异常: %s, 回退到 AI 处理", e)
 
-        # 其他命令 — 作为普通消息交给 Agent 处理
+        # /profile - 修改 AI 联系人在 Weave 上的头像/昵称/简介
+        if cmd_name == "profile":
+            await self._handle_profile_command(command, args, request_id, session_id)
+            return
+
+        # 其他命令 - 作为普通消息交给 Agent 处理
         full_text = f"{command} {args}".strip() if args else command
         source = self.build_source(
             chat_id=self.chat_id,
@@ -548,6 +553,115 @@ class WeaveAdapter(BasePlatformAdapter):
             # 中断当前会话的 Agent 运行
             session_key = self._build_session_key(self.chat_id)
             self._interrupt_session(session_key)
+
+    async def _handle_profile_command(self, command, args, request_id, session_id):
+        """处理 /profile 命令 - 修改 AI 联系人在 Weave 上的头像/昵称/简介
+
+        用法：
+          /profile                    - 显示用法
+          /profile name 新昵称         - 修改昵称
+          /profile desc 新简介         - 修改简介
+          /profile avatar /path/to/img - 修改头像（本地文件）
+        """
+        args = args.strip()
+        if not args:
+            usage = (
+                "**修改 AI 联系人简介**\n\n"
+                "用法：\n"
+                "- `/profile name 新昵称` - 修改昵称\n"
+                "- `/profile desc 新简介` - 修改简介\n"
+                "- `/profile avatar /path/to/img.png` - 修改头像\n\n"
+                "示例：\n"
+                "- `/profile name 我的工作助手`\n"
+                "- `/profile desc 专注于编程和架构设计`\n"
+                "- `/profile avatar ~/avatar.png`"
+            )
+            await self._send_raw({
+                "type": "command_result",
+                "command": command,
+                "request_id": request_id,
+                "session_id": session_id,
+                "success": True,
+                "content": usage,
+            })
+            return
+
+        parts = args.split(None, 1)
+        field = parts[0].lower()
+        value = parts[1] if len(parts) > 1 else ""
+
+        profile_data = {}
+        hint = ""
+
+        if field in ("name", "昵称"):
+            if not value:
+                hint = "请提供昵称，例如：/profile name 我的工作助手"
+            else:
+                profile_data["name"] = value[:50]
+                hint = f"昵称已更新: {value[:50]}"
+
+        elif field in ("desc", "description", "简介"):
+            if not value:
+                hint = "请提供简介，例如：/profile desc 专注于编程和架构设计"
+            else:
+                profile_data["description"] = value[:200]
+                hint = f"简介已更新: {value[:200]}"
+
+        elif field in ("avatar", "头像"):
+            if not value:
+                hint = "请提供头像文件路径，例如：/profile avatar ~/avatar.png"
+            else:
+                # 读取本地文件并转 Base64
+                import base64
+                expanded = os.path.expanduser(value)
+                if not os.path.isfile(expanded):
+                    hint = f"文件不存在: {expanded}"
+                else:
+                    try:
+                        with open(expanded, "rb") as f:
+                            raw = f.read()
+                        if len(raw) > 512 * 1024:
+                            hint = "头像文件不能超过 512KB"
+                        else:
+                            ext = expanded.rsplit(".", 1)[-1].lower()
+                            mime_map = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif"}
+                            mime = mime_map.get(ext, "image/png")
+                            b64 = base64.b64encode(raw).decode()
+                            profile_data["avatar"] = f"data:{mime};base64,{b64}"
+                            hint = f"头像已更新: {os.path.basename(expanded)}"
+                    except Exception as e:
+                        hint = f"读取文件失败: {e}"
+
+        else:
+            hint = f"未知字段: {field}\n支持的字段: name(昵称), desc(简介), avatar(头像)"
+
+        if not profile_data:
+            await self._send_raw({
+                "type": "command_result",
+                "command": command,
+                "request_id": request_id,
+                "session_id": session_id,
+                "success": False,
+                "content": hint,
+            })
+            return
+
+        # 发送 update_profile 到 Weave 后端
+        await self._send_raw({
+            "type": "update_profile",
+            "data": profile_data,
+        })
+
+        # 返回命令结果给前端
+        await self._send_raw({
+            "type": "command_result",
+            "command": command,
+            "request_id": request_id,
+            "session_id": session_id,
+            "success": True,
+            "content": hint,
+        })
+        logger.info("[Weave] /profile 命令: %s", profile_data)
 
     async def _handle_approval_respond(self, data: dict):
         """处理审批响应"""
