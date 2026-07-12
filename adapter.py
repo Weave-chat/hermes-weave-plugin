@@ -133,6 +133,10 @@ class WeaveAdapter(BasePlatformAdapter):
     _RECONNECT_MAX_DELAY = 60.0
     _RECONNECT_MAX_ATTEMPTS = 0  # 0 = 无限重连
 
+    # 网关运行时引用（由 GatewayRunner 在注册适配器时注入）
+    # 用于模型切换时设置 _session_model_overrides + 驱逐缓存的 agent
+    gateway_runner = None
+
     def __init__(self, config, **kwargs):
         platform = Platform("weave")
         super().__init__(config=config, platform=platform)
@@ -335,13 +339,13 @@ class WeaveAdapter(BasePlatformAdapter):
             logger.debug("[Weave] 未知消息类型: %s", msg_type)
 
     async def _handle_user_message(self, data: dict):
-        """处理用户消息 → 交给 Hermes Agent"""
+        """处理用户消息 -> 交给 Hermes Agent"""
         content = data.get("content", "")
         session_id = data.get("session_id", "")
         user_id = data.get("user_id", "weave_user")
         attachments = data.get("attachments", [])
 
-        if not content:
+        if not content and not attachments:
             return
 
         # 保存 session_id 映射
@@ -357,24 +361,77 @@ class WeaveAdapter(BasePlatformAdapter):
         )
         source.thread_id = session_id  # 用 thread_id 存 session_id
 
-        # 处理附件（base64 → 临时文件）
+        # 处理附件：base64 data URL -> 缓存文件 -> media_urls
         media_urls = []
         media_types = []
+        attachment_notes = []  # 附加到消息文本中的附件说明
+
         for att in attachments:
-            # Weave 附件是 base64 data URL，由 Agent 直接处理
-            # 这里仅记录元数据
-            media_types.append(att.get("type", "file"))
+            att_name = att.get("name", "attachment")
+            att_type = att.get("type", "file")
+            att_data = att.get("data", "")
+
+            if not att_data:
+                continue
+
+            try:
+                # 解析 data URL: "data:image/png;base64,xxxx"
+                import base64
+                if "," in att_data:
+                    header, b64_content = att_data.split(",", 1)
+                    # 从 header 提取 MIME 类型
+                    mime = header.split(":")[1].split(";")[0] if ":" in header else ""
+                else:
+                    b64_content = att_data
+                    mime = att_type if "/" in att_type else ""
+
+                raw_bytes = base64.b64decode(b64_content)
+
+                # 根据类型选择缓存函数
+                if att_type == "image" or mime.startswith("image/"):
+                    from gateway.platforms.base import cache_image_from_bytes
+                    ext = "." + (mime.split("/")[1] if "/" in mime else "png")
+                    if ext == ".jpeg": ext = ".jpg"
+                    cached_path = cache_image_from_bytes(raw_bytes, ext=ext)
+                    media_urls.append(cached_path)
+                    media_types.append(mime or f"image/{ext.lstrip('.')}")
+                    logger.info("[Weave] 图片附件已缓存: %s -> %s (%d bytes)", att_name, cached_path, len(raw_bytes))
+                else:
+                    from gateway.platforms.base import cache_document_from_bytes
+                    cached_path = cache_document_from_bytes(raw_bytes, att_name)
+                    media_urls.append(cached_path)
+                    media_types.append(mime or "application/octet-stream")
+                    logger.info("[Weave] 文件附件已缓存: %s -> %s (%d bytes)", att_name, cached_path, len(raw_bytes))
+
+                # 对小文本文件，将内容注入消息文本让 Agent 直接看到
+                if att_type != "image" and not mime.startswith("image/") and len(raw_bytes) < 8000:
+                    try:
+                        text_content = raw_bytes.decode("utf-8", errors="replace")
+                        attachment_notes.append(f"\n\n--- {att_name} ---\n{text_content}\n--- end of {att_name} ---")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning("[Weave] 附件处理失败: %s - %s", att_name, e)
+                attachment_notes.append(f"\n\n[附件 {att_name} 处理失败: {e}]")
+
+        # 将文本附件内容追加到消息文本
+        full_text = content + "".join(attachment_notes)
+
+        # 根据附件类型设置消息类型
+        msg_type = MessageType.TEXT
+        if media_urls and all(t.startswith("image/") for t in media_types):
+            msg_type = MessageType.PHOTO
 
         event = MessageEvent(
-            text=content,
-            message_type=MessageType.TEXT,
+            text=full_text,
+            message_type=msg_type,
             source=source,
             raw_message=data,
             media_urls=media_urls,
             media_types=media_types,
         )
 
-        # 交给基类处理（触发 Agent 运行）
+
         await self.handle_message(event)
 
     async def _handle_slash_command(self, data: dict):
@@ -456,16 +513,26 @@ class WeaveAdapter(BasePlatformAdapter):
                 logger.info("[Weave] /model 查询: %s, providers=%d", model, len(payload["providers"]))
                 return
             except Exception as e:
-                logger.warning("[Weave] /model 查询失败: %s, 回退到 AI 处理", e)
+                logger.warning("[Weave] /model 查询失败: %s", e)
+                # 失败时也返回 command_result，不 fall through 到 AI 处理
+                # 因为网关内置 /model 命令走 message_start 但不发 message_done，
+                # 会导致前端 streaming 状态卡死
+                await self._send_raw({
+                    "type": "command_result",
+                    "command": command,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "success": False,
+                    "content": f"模型查询失败: {e}",
+                })
+                return
 
-        # /model xxx --provider yyy — 切换模型
+        # /model xxx --provider yyy - 切换模型
         if cmd_name == "model" and args.strip():
             try:
-                # 直接修改 Hermes 配置
                 from hermes_cli.config import load_config, save_config
 
                 arg_line = args.strip()
-                # 解析参数: "model_name --provider provider_slug [--global]"
                 model_name = arg_line.split()[0]
                 provider_slug = ""
                 if "--provider" in arg_line:
@@ -481,6 +548,24 @@ class WeaveAdapter(BasePlatformAdapter):
                     cfg["model"]["provider"] = provider_slug
                 save_config(cfg)
 
+                # 通过 gateway_runner 驱逐缓存的 agent
+                # 这样下次消息会从更新后的 config 创建新 agent
+                if self.gateway_runner is not None:
+                    try:
+                        source = self.build_source(
+                            chat_id=self.chat_id,
+                            chat_name="Weave Chat",
+                            chat_type="dm",
+                            user_id=user_id,
+                        )
+                        session_key = self.gateway_runner._session_key_for_source(source)
+                        self.gateway_runner._evict_cached_agent(session_key)
+                        # 清除 session override，让网关从 config 读取新模型
+                        self.gateway_runner._session_model_overrides.pop(session_key, None)
+                        logger.info("[Weave] 已驱逐缓存 agent + 清除 session override: %s", session_key)
+                    except Exception as e:
+                        logger.warning("[Weave] gateway_runner 操作失败: %s", e)
+
                 await self._send_raw({
                     "type": "command_result",
                     "command": command,
@@ -493,11 +578,70 @@ class WeaveAdapter(BasePlatformAdapter):
                 logger.info("[Weave] 模型切换成功: %s (provider=%s)", model_name, provider_slug)
                 return
             except Exception as e:
-                logger.warning("[Weave] 模型切换异常: %s, 回退到 AI 处理", e)
+                logger.warning("[Weave] 模型切换异常: %s", e)
+                # 失败时也返回 command_result，不 fall through 到 AI 处理
+                await self._send_raw({
+                    "type": "command_result",
+                    "command": command,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "success": False,
+                    "content": f"模型切换失败: {e}",
+                })
+                return
 
         # /profile - 修改 AI 联系人在 Weave 上的头像/昵称/简介
         if cmd_name == "profile":
             await self._handle_profile_command(command, args, request_id, session_id)
+            return
+
+        # /reasoning, /yolo, /personality, /persona — Hermes 网关内置命令
+        # 这些命令不能透传给 AI（网关处理，响应走 message_start 而非 command_result），
+        # 适配器必须拦截并返回 command_result，否则前端 sendSilentCommand 超时。
+        if cmd_name in ("reasoning", "yolo", "personality", "persona"):
+            try:
+                # 透传给 AI 处理（改变状态）
+                full_text = f"{command} {args}".strip() if args else command
+                source = self.build_source(
+                    chat_id=self.chat_id,
+                    chat_name="Weave Chat",
+                    chat_type="dm",
+                    user_id=user_id,
+                )
+                source.thread_id = session_id
+
+                event = MessageEvent(
+                    text=full_text,
+                    message_type=MessageType.TEXT,
+                    source=source,
+                    raw_message=data,
+                )
+
+                if request_id:
+                    self._pending_session_requests[request_id] = self.chat_id
+
+                await self.handle_message(event)
+
+                # 同时返回 command_result，让前端 sendSilentCommand 不超时
+                # 注意：内置命令的响应不走 command_result，所以这里手动发一个
+                await self._send_raw({
+                    "type": "command_result",
+                    "command": command,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "success": True,
+                    "content": f"命令已发送: {command} {args}".strip(),
+                })
+            except Exception as e:
+                logger.warning("[Weave] %s 命令异常: %s", cmd_name, e)
+                await self._send_raw({
+                    "type": "command_result",
+                    "command": command,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "success": False,
+                    "content": f"命令执行失败: {e}",
+                })
             return
 
         # 其他命令 - 作为普通消息交给 Agent 处理
@@ -708,7 +852,7 @@ class WeaveAdapter(BasePlatformAdapter):
         """
         session_id = self._session_ids.get(chat_id, "")
 
-        # 最终回复（reply_to 有值）且已通过流式完成 → 跳过，避免重复
+        # 最终回复（reply_to 有值）且已通过流式完成 -> 跳过，避免重复
         if reply_to is not None and session_id in self._finalized_sessions:
             return SendResult(success=True, message_id="weave_streaming")
 
