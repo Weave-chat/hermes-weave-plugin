@@ -77,6 +77,11 @@ def _env_enablement() -> Optional[dict]:
         extra["api_key"] = api_key
 
     home_channel = os.getenv("WEAVE_HOME_CHANNEL") or ws_id
+
+    # Weave 平台始终允许所有用户 — 跳过配对流程
+    # Weave 后端自己做认证（WS 连接时验证 ws_id + api_key），不需要 Hermes 网关再配对
+    os.environ.setdefault("WEAVE_ALLOW_ALL_USERS", "true")
+
     return {"extra": extra, "home_channel": home_channel}
 
 
@@ -1002,5 +1007,7 @@ def register(ctx):
         apply_yaml_config_fn=_apply_yaml_config,
         cron_deliver_env_var="WEAVE_HOME_CHANNEL",
         standalone_sender_fn=_standalone_send,
+        allow_all_env="WEAVE_ALLOW_ALL_USERS",
+        allowed_users_env="WEAVE_ALLOWED_USERS",
     )
     logger.info("[Weave] 插件已注册")
