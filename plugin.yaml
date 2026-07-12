@@ -1,0 +1,4 @@
+name: weave-platform
+version: "1.0.0"
+description: "Weave 平台适配器 - 通过反向 WebSocket 连接 Weave 后端"
+author: "Weave"
