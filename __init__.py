@@ -1,1 +1,1 @@
-from adapter import register, check_requirements
+from .adapter import register, check_requirements
