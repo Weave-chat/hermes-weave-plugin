@@ -4,11 +4,26 @@
 #   或: git clone https://github.com/Weave-chat/hermes-weave-plugin && powershell -ExecutionPolicy Bypass -File install.ps1
 $ErrorActionPreference = "Stop"
 
+# irm | iex 模式下脚本结束或出错会直接关闭窗口，用 trap 捕获意外错误并暂停
+trap {
+    Write-Host ""
+    Write-Host "[x] 错误: $_" -ForegroundColor Red
+    Write-Host ""
+    Read-Host "按 Enter 键退出"
+    exit 1
+}
+
 # ── 辅助函数 ──
 function Write-Info  { param([string]$msg) Write-Host "[i] $msg" -ForegroundColor Cyan }
 function Write-Ok    { param([string]$msg) Write-Host "[v] $msg" -ForegroundColor Green }
 function Write-Warn  { param([string]$msg) Write-Host "[!] $msg" -ForegroundColor Yellow }
-function Write-Fail  { param([string]$msg) Write-Host "[x] $msg" -ForegroundColor Red; exit 1 }
+function Write-Fail  {
+    param([string]$msg)
+    Write-Host "[x] $msg" -ForegroundColor Red
+    Write-Host ""
+    Read-Host "按 Enter 键退出"
+    exit 1
+}
 
 # UTF-8 无 BOM 编码（写 .env 和 config.yaml 时使用，避免 Python 读取时 BOM 导致 key 解析错误）
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -383,3 +398,5 @@ Write-Host "    hermes -p $selectedProfile gateway run --replace"
 Write-Host ""
 Write-Host "  详细文档: https://www.weaveai.chat/docs/hermes"
 Write-Host ""
+Write-Host ""
+Read-Host "按 Enter 键退出"
