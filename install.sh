@@ -4,6 +4,9 @@
 #   或: git clone https://github.com/Weave-chat/hermes-weave-plugin && bash install.sh
 set -e
 
+# curl | bash 模式下 stdin 是管道，重定向到终端以支持交互输入
+[ -t 0 ] || exec 0</dev/tty
+
 REPO="https://github.com/Weave-chat/hermes-weave-plugin"
 # HERMES_HOME 始终指向 ~/.hermes 根目录（不使用环境变量，因为 profile 下会覆盖）
 HERMES_HOME=""
