@@ -220,13 +220,17 @@ try {
         @{ url = $giteeUrl;  name = "Gitee";  zip = "/repository/archive/main.zip" }
     )
 
+    # 外部命令的 stderr 在 Stop 模式下会触发 trap，下载期间临时关闭
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+
     foreach ($src in $sources) {
         if ($downloadOk) { break }
 
         # 尝试 git clone
         if (Get-Command git -ErrorAction SilentlyContinue) {
             Write-Info "尝试 $($src.name) git clone..."
-            & git clone --depth 1 "$($src.url).git" $clonePath 2>&1
+            & git clone --depth 1 "$($src.url).git" $clonePath 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 Write-Ok "$($src.name) git clone 完成"
                 $downloadOk = $true
@@ -252,6 +256,8 @@ try {
             Write-Warn "$($src.name) ZIP 下载失败: $_"
         }
     }
+
+    $ErrorActionPreference = $prevEAP
 
     if (-not $downloadOk) {
         Write-Fail "无法下载插件（GitHub 和 Gitee 均不可达）。请手动下载:`n  1. 浏览器打开: $repoUrl/releases`n  2. 下载 ZIP 并解压到: $pluginDir`n  3. 重新运行此脚本"
