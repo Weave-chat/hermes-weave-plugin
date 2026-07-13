@@ -5,7 +5,16 @@
 set -e
 
 # curl | bash 模式下 stdin 是管道，重定向到终端以支持交互输入
-[ -t 0 ] || exec 0</dev/tty
+if ! [ -t 0 ]; then
+    if [ -e /dev/tty ]; then
+        exec 0</dev/tty
+    else
+        echo "无法访问终端，请手动下载运行:"
+        echo "  curl -o /tmp/install.sh https://raw.githubusercontent.com/Weave-chat/hermes-weave-plugin/main/install.sh"
+        echo "  bash /tmp/install.sh"
+        exit 1
+    fi
+fi
 
 REPO="https://github.com/Weave-chat/hermes-weave-plugin"
 # HERMES_HOME 始终指向 ~/.hermes 根目录（不使用环境变量，因为 profile 下会覆盖）
