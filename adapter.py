@@ -186,8 +186,9 @@ class WeaveAdapter(BasePlatformAdapter):
 
     # ── 生命周期 ─────────────────────────────────────────────────
 
-    async def connect(self) -> bool:
+    async def connect(self, **kwargs) -> bool:
         """连接到 Weave 后端"""
+        # 兼容不同版本 Hermes：忽略 is_reconnect 等额外参数
         if not HAS_WEBSOCKETS:
             logger.error("[Weave] websockets 库未安装，请运行: pip install websockets")
             return False
