@@ -116,7 +116,10 @@ if ($hermes) {
         # 从 status 输出提取安装路径
         foreach ($line in $statusOutput) {
             if ($line -match "Project:\s+(.+)") {
-                Write-Ok "Hermes 安装路径: $($matches[1].Trim())"
+                $projectPath = $matches[1].Trim()
+                Write-Ok "Hermes 安装路径: $projectPath"
+                # Project 路径是 ~/.hermes/hermes-agent，取上级目录得到 .hermes
+                $hermesHome = Split-Path $projectPath -Parent
                 break
             }
         }
