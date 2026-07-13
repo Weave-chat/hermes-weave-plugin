@@ -6,7 +6,8 @@ set -e
 
 # curl | bash 模式下 stdin 是管道，重定向到终端以支持交互输入
 if ! [ -t 0 ]; then
-    if [ -e /dev/tty ]; then
+    # 用子 shell 测试 /dev/tty 是否可读（[ -e ] 只检查文件存在，不检查可访问性）
+    if (exec 0</dev/tty) 2>/dev/null; then
         exec 0</dev/tty
     else
         echo "无法访问终端，请手动下载运行:"
