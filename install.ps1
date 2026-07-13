@@ -78,7 +78,7 @@ if (-not $realHome) {
 }
 $hermesHome = Join-Path $realHome ".hermes"
 
-# Hermes CLI
+# Hermes CLI 检测：找到可执行文件后用 hermes status 确认可用
 $hermes = $null
 if (Get-Command hermes -ErrorAction SilentlyContinue) {
     $hermes = "hermes"
@@ -97,8 +97,33 @@ if (Get-Command hermes -ErrorAction SilentlyContinue) {
         }
     }
 }
+
 if ($hermes) {
-    Write-Ok "Hermes CLI: $hermes"
+    # 运行 hermes status 确认安装情况
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $statusOutput = & $hermes status 2>&1
+        $statusOk = ($LASTEXITCODE -eq 0)
+    } catch {
+        $statusOk = $false
+        $statusOutput = $_
+    }
+    $ErrorActionPreference = $prevEAP
+
+    if ($statusOk) {
+        Write-Ok "Hermes CLI: $hermes"
+        # 从 status 输出提取安装路径
+        foreach ($line in $statusOutput) {
+            if ($line -match "Project:\s+(.+)") {
+                Write-Ok "Hermes 安装路径: $($matches[1].Trim())"
+                break
+            }
+        }
+    } else {
+        Write-Warn "Hermes CLI 已找到但 status 命令执行失败，可能安装不完整"
+        $hermes = $null
+    }
 } else {
     Write-Warn "未找到 hermes CLI（插件仍可安装，但需要手动启用）"
 }
