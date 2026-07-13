@@ -141,21 +141,42 @@ info "[3/6] 下载插件..."
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-if command -v git &>/dev/null; then
-    if git clone --depth 1 "$REPO" "$TMP_DIR/weave"; then
-        ok "git clone 完成"
-    else
-        fail "git clone 失败（请检查网络连接或仓库地址: $REPO）"
+GITEE_REPO="https://gitee.com/weave-ai/hermes-weave-plugin"
+DOWNLOAD_OK=0
+
+# 下载源：GitHub 优先，Gitee 兜底（国内网络）
+for SRC_REPO in "$REPO" "$GITEE_REPO"; do
+    [ "$DOWNLOAD_OK" = "1" ] && break
+
+    # 尝试 git clone
+    if command -v git &>/dev/null; then
+        info "尝试 git clone: $SRC_REPO ..."
+        if git clone --depth 1 "$SRC_REPO" "$TMP_DIR/weave" 2>&1; then
+            ok "git clone 完成"
+            DOWNLOAD_OK=1
+            continue
+        fi
+        warn "git clone 失败: $SRC_REPO"
     fi
-else
-    warn "未找到 git，使用 curl 下载..."
+
+    # 尝试 curl 下载 tar.gz/zip
     if command -v curl &>/dev/null; then
-        curl -sSL "$REPO/archive/refs/heads/main.tar.gz" | tar xz -C "$TMP_DIR"
-        mv "$TMP_DIR/hermes-weave-plugin-main" "$TMP_DIR/weave"
-        ok "下载完成"
-    else
-        fail "未找到 git 和 curl，无法下载"
+        info "尝试下载 ZIP: $SRC_REPO ..."
+        if curl -sSL --max-time 30 "$SRC_REPO/archive/refs/heads/main.tar.gz" | tar xz -C "$TMP_DIR" 2>/dev/null; then
+            mv "$TMP_DIR/hermes-weave-plugin-main" "$TMP_DIR/weave"
+            ok "下载完成"
+            DOWNLOAD_OK=1
+            continue
+        fi
+        warn "下载失败: $SRC_REPO"
     fi
+done
+
+if [ "$DOWNLOAD_OK" = "0" ]; then
+    fail "无法下载插件（GitHub 和 Gitee 均不可达）。请手动下载:
+  1. 浏览器打开: $REPO/releases
+  2. 下载 ZIP 并解压到: $PLUGIN_DIR
+  3. 重新运行此脚本"
 fi
 
 # 检查下载内容
