@@ -211,25 +211,39 @@ New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
 try {
     $clonePath = Join-Path $tmpDir "weave"
+    $downloadOk = $false
 
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        & git clone --depth 1 $repoUrl $clonePath
-        if ($LASTEXITCODE -ne 0) {
-            Write-Fail "git clone 失败（请检查网络连接或仓库地址: $repoUrl）"
+    # 方式1: git clone
+    if (-not $downloadOk -and (Get-Command git -ErrorAction SilentlyContinue)) {
+        & git clone --depth 1 $repoUrl $clonePath 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "git clone 完成"
+            $downloadOk = $true
+        } else {
+            Write-Warn "git clone 失败，尝试下载 ZIP..."
         }
-        Write-Ok "git clone 完成"
-    } else {
-        Write-Warn "未找到 git，使用 PowerShell 下载..."
+    }
+
+    # 方式2: 下载 ZIP（git 不可用或 clone 失败时）
+    if (-not $downloadOk) {
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+            Write-Warn "未找到 git，使用 PowerShell 下载..."
+        }
         $zipUrl = "$repoUrl/archive/refs/heads/main.zip"
         $zipPath = Join-Path $tmpDir "weave.zip"
         try {
             Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
             Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
             Move-Item (Join-Path $tmpDir "hermes-weave-plugin-main") $clonePath
-            Write-Ok "下载完成"
+            Write-Ok "ZIP 下载完成"
+            $downloadOk = $true
         } catch {
-            Write-Fail "下载失败: $_"
+            Write-Warn "ZIP 下载也失败: $_"
         }
+    }
+
+    if (-not $downloadOk) {
+        Write-Fail "无法下载插件（网络无法访问 GitHub）。请手动下载:`n  1. 浏览器打开: $repoUrl/releases`n  2. 下载 ZIP 并解压到: $pluginDir`n  3. 重新运行此脚本"
     }
 
     # 检查下载内容
