@@ -83,7 +83,14 @@ $hermes = $null
 if (Get-Command hermes -ErrorAction SilentlyContinue) {
     $hermes = "hermes"
 } else {
-    foreach ($p in @("$realHome\.local\bin\hermes.exe", "$realHome\.local\bin\hermes.cmd")) {
+    # 检查常见安装路径（优先级：.local/bin > hermes-agent venv）
+    $hermesPaths = @(
+        "$realHome\.local\bin\hermes.exe",
+        "$realHome\.local\bin\hermes.cmd",
+        "$realHome\.hermes\hermes-agent\venv\Scripts\hermes.exe",
+        "$realHome\.hermes\hermes-agent\venv\Scripts\hermes.cmd"
+    )
+    foreach ($p in $hermesPaths) {
         if (Test-Path $p) {
             $hermes = $p
             break
