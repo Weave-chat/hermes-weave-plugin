@@ -5,7 +5,8 @@
 set -e
 
 REPO="https://github.com/Weave-chat/hermes-weave-plugin"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+# HERMES_HOME 始终指向 ~/.hermes 根目录（不使用环境变量，因为 profile 下会覆盖）
+HERMES_HOME="$HOME/.hermes"
 
 # ── 颜色 ──
 if [ -t 1 ]; then
