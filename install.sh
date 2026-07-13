@@ -120,7 +120,7 @@ while true; do
 done
 
 PROFILE_DIR="$PROFILES_DIR/$SELECTED_PROFILE"
-PLUGIN_DIR="$PROFILE_DIR/plugins/weave-platform"
+PLUGIN_DIR="$HERMES_HOME/plugins/platforms/weave"
 ENV_FILE="$PROFILE_DIR/.env"
 CONFIG_FILE="$PROFILE_DIR/config.yaml"
 
