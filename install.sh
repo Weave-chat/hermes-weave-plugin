@@ -141,7 +141,7 @@ info "[3/6] 下载插件..."
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-GITEE_REPO="https://gitee.com/weave-ai/hermes-weave-plugin"
+GITEE_REPO="https://gitee.com/weaveai/hermes-weave-plugin"
 DOWNLOAD_OK=0
 
 # 下载源：GitHub 优先，Gitee 兜底（国内网络）

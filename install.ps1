@@ -206,7 +206,7 @@ Write-Host ""
 Write-Info "[3/6] 下载插件..."
 
 $repoUrl = "https://github.com/Weave-chat/hermes-weave-plugin"
-$giteeUrl = "https://gitee.com/weave-ai/hermes-weave-plugin"
+$giteeUrl = "https://gitee.com/weaveai/hermes-weave-plugin"
 $tmpDir = Join-Path $env:TEMP "weave_install_$(Get-Random)"
 New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
