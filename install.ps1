@@ -4,12 +4,28 @@
 #   或: git clone https://github.com/Weave-chat/hermes-weave-plugin && powershell -ExecutionPolicy Bypass -File install.ps1
 $ErrorActionPreference = "Stop"
 
+# irm | iex 模式下 Read-Host 可能不阻塞，用轮询 + Start-Sleep 兜底
+function Wait-BeforeExit {
+    Write-Host "按任意键退出（15 秒后自动关闭）..."
+    try {
+        $start = Get-Date
+        while (((Get-Date) - $start).TotalSeconds -lt 15) {
+            if ([Console]::KeyAvailable) {
+                [Console]::ReadKey($true) | Out-Null
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    } catch {
+        Start-Sleep -Seconds 15
+    }
+}
+
 # irm | iex 模式下脚本结束或出错会直接关闭窗口，用 trap 捕获意外错误并暂停
 trap {
     Write-Host ""
     Write-Host "[x] 错误: $_" -ForegroundColor Red
-    Write-Host ""
-    Read-Host "按 Enter 键退出"
+    Wait-BeforeExit
     exit 1
 }
 
@@ -20,8 +36,7 @@ function Write-Warn  { param([string]$msg) Write-Host "[!] $msg" -ForegroundColo
 function Write-Fail  {
     param([string]$msg)
     Write-Host "[x] $msg" -ForegroundColor Red
-    Write-Host ""
-    Read-Host "按 Enter 键退出"
+    Wait-BeforeExit
     exit 1
 }
 
@@ -398,5 +413,4 @@ Write-Host "    hermes -p $selectedProfile gateway run --replace"
 Write-Host ""
 Write-Host "  详细文档: https://www.weaveai.chat/docs/hermes"
 Write-Host ""
-Write-Host ""
-Read-Host "按 Enter 键退出"
+Wait-BeforeExit
