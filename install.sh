@@ -142,8 +142,11 @@ TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 if command -v git &>/dev/null; then
-    git clone --depth 1 "$REPO" "$TMP_DIR/weave" 2>/dev/null
-    ok "git clone 完成"
+    if git clone --depth 1 "$REPO" "$TMP_DIR/weave"; then
+        ok "git clone 完成"
+    else
+        fail "git clone 失败（请检查网络连接或仓库地址: $REPO）"
+    fi
 else
     warn "未找到 git，使用 curl 下载..."
     if command -v curl &>/dev/null; then
