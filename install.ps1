@@ -113,15 +113,18 @@ if ($hermes) {
 
     if ($statusOk) {
         Write-Ok "Hermes CLI: $hermes"
-        # 从 status 输出提取安装路径
+        # 从 status 输出提取 Project 路径
+        $projectPath = $null
         foreach ($line in $statusOutput) {
             if ($line -match "Project:\s+(.+)") {
                 $projectPath = $matches[1].Trim()
-                Write-Ok "Hermes 安装路径: $projectPath"
-                # Project 路径是 ~/.hermes/hermes-agent，取上级目录得到 .hermes
-                $hermesHome = Split-Path $projectPath -Parent
                 break
             }
+        }
+        if ($projectPath) {
+            Write-Ok "Hermes 安装路径: $projectPath"
+            # Project 路径格式: <hermesHome>/hermes-agent，去掉末尾的 hermes-agent
+            $hermesHome = $projectPath -replace "[/\\]hermes-agent\s*$", ""
         }
     } else {
         Write-Warn "Hermes CLI 已找到但 status 命令执行失败，可能安装不完整"
@@ -132,10 +135,10 @@ if ($hermes) {
 }
 
 # Hermes home 目录
+Write-Ok "Hermes Home: $hermesHome"
 if (-not (Test-Path $hermesHome)) {
     Write-Fail "Hermes 目录不存在: $hermesHome（请先安装 Hermes Agent）"
 }
-Write-Ok "Hermes Home: $hermesHome"
 
 # ═══════════════════════════════════════════
 # [2/6] 选择 Profile
