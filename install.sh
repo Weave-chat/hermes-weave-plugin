@@ -6,7 +6,7 @@ set -e
 
 REPO="https://github.com/Weave-chat/hermes-weave-plugin"
 # HERMES_HOME 始终指向 ~/.hermes 根目录（不使用环境变量，因为 profile 下会覆盖）
-HERMES_HOME="$HOME/.hermes"
+HERMES_HOME=""
 
 # ── 颜色 ──
 if [ -t 1 ]; then
@@ -41,6 +41,10 @@ else
     fail "未找到 Python，请先安装 Python 3.10+"
 fi
 ok "Python: $($PYTHON --version 2>&1)"
+
+# 检测真实用户目录（Hermes profile 可能覆盖 $HOME）
+REAL_HOME=$($PYTHON -c "import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)" 2>/dev/null || echo "$HOME")
+HERMES_HOME="$REAL_HOME/.hermes"
 
 # Hermes CLI
 HERMES=""
