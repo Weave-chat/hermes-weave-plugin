@@ -187,6 +187,17 @@ rm -rf "$PLUGIN_DIR"
 cp -r "$TMP_DIR/weave" "$PLUGIN_DIR"
 ok "已安装到 $PLUGIN_DIR"
 
+# 安装 Python 依赖（websockets）
+info "检查 Python 依赖 (websockets)..."
+HERMES_VENV="$REAL_HOME/.hermes/hermes-agent/venv"
+if [ -x "$HERMES_VENV/bin/pip" ]; then
+    "$HERMES_VENV/bin/pip" install -q websockets 2>/dev/null && ok "websockets 已安装到 Hermes venv" || warn "websockets 安装失败，请手动: $HERMES_VENV/bin/pip install websockets"
+elif "$PYTHON" -c "import websockets" 2>/dev/null; then
+    ok "websockets 已安装"
+else
+    "$PYTHON" -m pip install -q websockets 2>/dev/null && ok "websockets 安装完成" || warn "websockets 安装失败，请手动: pip install websockets"
+fi
+
 # ═══════════════════════════════════════════
 # [4/6] 配置环境变量
 # ═══════════════════════════════════════════
@@ -274,75 +285,75 @@ echo ""
 # ═══════════════════════════════════════════
 info "[5/6] 启用插件..."
 
-# 方式一：优先用 hermes CLI
+# 先直接尝试 hermes CLI 启用（不管 list 输出格式）
 if [ -n "$HERMES" ]; then
-    # 检查是否已启用
-    ENABLED=$("$HERMES" -p "$SELECTED_PROFILE" plugins list 2>/dev/null | grep "weave-platform" | head -1)
-    if echo "$ENABLED" | grep -q "enabled"; then
-        ok "weave-platform 已启用"
-    elif [ -n "$ENABLED" ]; then
-        # 已安装但未启用
-        "$HERMES" -p "$SELECTED_PROFILE" plugins enable weave-platform 2>/dev/null && ok "已通过 CLI 启用" || {
-            warn "CLI 启用失败，尝试手动修改 config.yaml..."
-            ENABLE_PLUGIN_MANUALLY=1
-        }
-    else
-        # 未安装到 hermes 的插件系统，手动修改 config.yaml
-        ENABLE_PLUGIN_MANUALLY=1
-    fi
-else
-    ENABLE_PLUGIN_MANUALLY=1
+    "$HERMES" -p "$SELECTED_PROFILE" plugins enable weave-platform 2>/dev/null && ok "已通过 CLI 启用" || true
 fi
 
-# 方式二：手动修改 config.yaml
-if [ "${ENABLE_PLUGIN_MANUALLY:-0}" = "1" ]; then
-    if [ ! -f "$CONFIG_FILE" ]; then
-        # config.yaml 不存在，创建
-        cat > "$CONFIG_FILE" << 'YAML'
+# 验证 config.yaml 中是否已包含 weave-platform
+if grep -q "weave-platform" "$CONFIG_FILE" 2>/dev/null; then
+    ok "config.yaml 中已有 weave-platform"
+elif [ ! -f "$CONFIG_FILE" ]; then
+    # config.yaml 不存在，创建
+    cat > "$CONFIG_FILE" << 'YAML'
 plugins:
   enabled:
   - weave-platform
   disabled: []
 YAML
-        ok "已创建 config.yaml 并启用 weave-platform"
-    else
-        # 检查是否已启用
-        if grep -q "weave-platform" "$CONFIG_FILE" 2>/dev/null; then
-            ok "config.yaml 中已有 weave-platform"
-        else
-            # 用 python 安全修改 YAML
-            "$PYTHON" - << PYEOF
-import yaml, sys
-
+    ok "已创建 config.yaml 并启用 weave-platform"
+else
+    # config.yaml 存在但没有 weave-platform，用 Python 修改
+    PY_OK=0
+    "$PYTHON" - << PYEOF 2>/dev/null && PY_OK=1
+import yaml
 config_path = "$CONFIG_FILE"
 try:
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f) or {}
 except Exception:
     config = {}
-
 if 'plugins' not in config:
     config['plugins'] = {'enabled': [], 'disabled': []}
 if 'enabled' not in config['plugins']:
     config['plugins']['enabled'] = []
 if 'disabled' not in config['plugins']:
     config['plugins']['disabled'] = []
-
 if 'weave-platform' not in config['plugins']['enabled']:
     config['plugins']['enabled'].append('weave-platform')
-    # 从 disabled 中移除（如果存在）
     if 'weave-platform' in config['plugins'].get('disabled', []):
         config['plugins']['disabled'].remove('weave-platform')
-
 with open(config_path, 'w') as f:
     yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 print("OK")
 PYEOF
-            if [ $? -eq 0 ]; then
-                ok "已在 config.yaml 中启用 weave-platform"
+    if [ "$PY_OK" = "1" ]; then
+        ok "已在 config.yaml 中启用 weave-platform"
+    else
+        # Python 失败（PyYAML 未安装等），用 sed 兜底
+        warn "Python YAML 修改失败，使用 sed 兜底..."
+        if grep -q "^plugins:" "$CONFIG_FILE" 2>/dev/null; then
+            # plugins 节存在
+            if grep -q "enabled: \[\]" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i.bak "s|enabled: \[\]|enabled:\n  - weave-platform|" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
+            elif grep -q "^  enabled:" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i.bak "/^  enabled:/a\\  - weave-platform" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
             else
-                warn "自动修改 config.yaml 失败，请手动添加 weave-platform 到 plugins.enabled"
+                sed -i.bak "/^plugins:/a\\  enabled:\n  - weave-platform" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
             fi
+        else
+            # plugins 节不存在，追加
+            echo "" >> "$CONFIG_FILE"
+            echo "plugins:" >> "$CONFIG_FILE"
+            echo "  enabled:" >> "$CONFIG_FILE"
+            echo "  - weave-platform" >> "$CONFIG_FILE"
+            echo "  disabled: []" >> "$CONFIG_FILE"
+        fi
+        # 验证
+        if grep -q "weave-platform" "$CONFIG_FILE" 2>/dev/null; then
+            ok "已通过 sed 在 config.yaml 中启用 weave-platform"
+        else
+            warn "自动修改 config.yaml 失败，请手动添加 weave-platform 到 plugins.enabled"
         fi
     fi
 fi
