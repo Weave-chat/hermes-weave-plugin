@@ -202,62 +202,71 @@ get_env() {
     grep "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d'=' -f2-
 }
 
-# 写入环境变量（如果不存在）
-set_env_if_absent() {
+# 写入环境变量（已存在则替换，不存在则追加）
+set_env() {
     local key="$1" val="$2"
-    if ! grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
-        echo "${key}=${val}" >> "$ENV_FILE"
-        ok "已写入 ${key}"
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i.bak "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
     else
-        local existing=$(get_env "$key")
-        ok "${key} 已存在: ${existing:0:20}...（保留）"
+        echo "${key}=${val}" >> "$ENV_FILE"
     fi
 }
 
 echo ""
-echo "  请输入 Weave 连接配置:"
+echo "  请输入 Weave 连接配置（直接回车保留当前值）:"
 echo ""
 
 # WEAVE_WS_URL
 EXISTING_URL=$(get_env "WEAVE_WS_URL")
-if [ -n "$EXISTING_URL" ]; then
-    ok "WEAVE_WS_URL 已存在: $EXISTING_URL（保留）"
+DEFAULT_URL="${EXISTING_URL:-wss://www.weaveai.chat}"
+echo "  当前 WEAVE_WS_URL: $DEFAULT_URL"
+read -p "  Weave WebSocket URL: " input_url
+if [ -n "$input_url" ]; then
+    set_env "WEAVE_WS_URL" "$input_url"
+    ok "WEAVE_WS_URL 已更新: $input_url"
+elif [ -z "$EXISTING_URL" ]; then
+    set_env "WEAVE_WS_URL" "$DEFAULT_URL"
+    ok "WEAVE_WS_URL 已设置: $DEFAULT_URL"
 else
-    read -p "  Weave WebSocket URL [wss://www.weaveai.chat]: " input_url
-    WEAVE_URL="${input_url:-wss://www.weaveai.chat}"
-    set_env_if_absent "WEAVE_WS_URL" "$WEAVE_URL"
+    ok "WEAVE_WS_URL 保留: $EXISTING_URL"
 fi
 
 # WEAVE_WS_ID
 EXISTING_ID=$(get_env "WEAVE_WS_ID")
 if [ -n "$EXISTING_ID" ]; then
-    ok "WEAVE_WS_ID 已存在: ${EXISTING_ID:0:12}...（保留）"
-else
-    echo ""
-    echo "  WS ID 是在 Weave 中创建 AI 联系人时生成的标识符。"
-    echo "  获取方式: Weave 网站 → 联系人菜单 → 添加 AI 联系人 → 复制 WS ID"
-    echo ""
-    while true; do
-        read -p "  Weave WS ID: " input_id
-        if [ -n "$input_id" ]; then
-            set_env_if_absent "WEAVE_WS_ID" "$input_id"
-            break
-        fi
-        warn "WS ID 不能为空"
-    done
+    echo "  当前 WEAVE_WS_ID: ${EXISTING_ID:0:12}..."
 fi
+echo ""
+echo "  WS ID 是在 Weave 中创建 AI 联系人时生成的标识符。"
+echo "  获取方式: Weave 网站 -> 联系人菜单 -> 添加 AI 联系人 -> 复制 WS ID"
+echo ""
+while true; do
+    read -p "  Weave WS ID: " input_id
+    if [ -n "$input_id" ]; then
+        set_env "WEAVE_WS_ID" "$input_id"
+        ok "WEAVE_WS_ID 已更新"
+        break
+    fi
+    if [ -n "$EXISTING_ID" ]; then
+        ok "WEAVE_WS_ID 保留: ${EXISTING_ID:0:12}..."
+        break
+    fi
+    warn "WS ID 不能为空"
+done
 
 # WEAVE_API_KEY（可选）
 EXISTING_KEY=$(get_env "WEAVE_API_KEY")
 if [ -n "$EXISTING_KEY" ]; then
-    ok "WEAVE_API_KEY 已存在（保留）"
+    echo "  当前 WEAVE_API_KEY: ******（已设置）"
+fi
+read -p "  API Key（可选，直接回车跳过）: " input_key
+if [ -n "$input_key" ]; then
+    set_env "WEAVE_API_KEY" "$input_key"
+    ok "WEAVE_API_KEY 已更新"
+elif [ -n "$EXISTING_KEY" ]; then
+    ok "WEAVE_API_KEY 保留（已设置）"
 else
-    read -p "  API Key（可选，直接回车跳过）: " input_key
-    if [ -n "$input_key" ]; then
-        set_env_if_absent "WEAVE_API_KEY" "$input_key"
-    else
-        info "跳过 API Key（演示模式，无需认证）"
-    fi
+    info "跳过 API Key（演示模式，无需认证）"
 fi
 
 echo ""

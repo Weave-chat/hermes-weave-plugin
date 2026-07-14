@@ -311,66 +311,79 @@ function Get-EnvValue {
     return $null
 }
 
-# 写入环境变量（如果不存在）
-function Set-EnvIfAbsent {
+# 写入环境变量（已存在则替换，不存在则追加）
+function Set-EnvValue {
     param([string]$key, [string]$val)
-    $existing = Get-EnvValue $key
-    if ($null -eq $existing) {
-        [System.IO.File]::AppendAllText($envFile, "$key=$val`n", $utf8NoBom)
-        Write-Ok "已写入 $key"
+    if (Test-Path $envFile) {
+        $content = Get-Content $envFile -Raw -ErrorAction SilentlyContinue
+        if ($content -and ($content -match "(?m)^$key=.*$")) {
+            $content = $content -replace "(?m)^$key=.*$", "$key=$val"
+            [System.IO.File]::WriteAllText($envFile, $content, $utf8NoBom)
+        } else {
+            [System.IO.File]::AppendAllText($envFile, "$key=$val`n", $utf8NoBom)
+        }
     } else {
-        $preview = $existing
-        if ($existing.Length -gt 20) { $preview = $existing.Substring(0, 20) }
-        Write-Ok "$key 已存在: ${preview}...（保留）"
+        [System.IO.File]::WriteAllText($envFile, "$key=$val`n", $utf8NoBom)
     }
 }
 
 Write-Host ""
-Write-Host "  请输入 Weave 连接配置:"
+Write-Host "  请输入 Weave 连接配置（直接回车保留当前值）:"
 Write-Host ""
 
 # WEAVE_WS_URL
 $existingUrl = Get-EnvValue "WEAVE_WS_URL"
-if ($existingUrl) {
-    Write-Ok "WEAVE_WS_URL 已存在: $existingUrl（保留）"
+$defaultUrl = if ($existingUrl) { $existingUrl } else { "wss://www.weaveai.chat" }
+Write-Host "  当前 WEAVE_WS_URL: $defaultUrl"
+$inputUrl = Read-Host "  Weave WebSocket URL"
+if ($inputUrl) {
+    Set-EnvValue "WEAVE_WS_URL" $inputUrl
+    Write-Ok "WEAVE_WS_URL 已更新: $inputUrl"
+} elseif (-not $existingUrl) {
+    Set-EnvValue "WEAVE_WS_URL" $defaultUrl
+    Write-Ok "WEAVE_WS_URL 已设置: $defaultUrl"
 } else {
-    $inputUrl = Read-Host "  Weave WebSocket URL [wss://www.weaveai.chat]"
-    if (-not $inputUrl) { $inputUrl = "wss://www.weaveai.chat" }
-    Set-EnvIfAbsent "WEAVE_WS_URL" $inputUrl
+    Write-Ok "WEAVE_WS_URL 保留: $existingUrl"
 }
 
 # WEAVE_WS_ID
 $existingId = Get-EnvValue "WEAVE_WS_ID"
 if ($existingId) {
     $preview = $existingId
-    if ($existingId.Length -gt 12) { $preview = $existingId.Substring(0, 12) }
-    Write-Ok "WEAVE_WS_ID 已存在: ${preview}...（保留）"
-} else {
-    Write-Host ""
-    Write-Host "  WS ID 是在 Weave 中创建 AI 联系人时生成的标识符。"
-    Write-Host "  获取方式: Weave 网站 -> 联系人菜单 -> 添加 AI 联系人 -> 复制 WS ID"
-    Write-Host ""
-    while ($true) {
-        $inputId = Read-Host "  Weave WS ID"
-        if ($inputId) {
-            Set-EnvIfAbsent "WEAVE_WS_ID" $inputId
-            break
-        }
-        Write-Warn "WS ID 不能为空"
+    if ($existingId.Length -gt 12) { $preview = $existingId.Substring(0, 12) + "..." }
+    Write-Host "  当前 WEAVE_WS_ID: $preview"
+}
+Write-Host ""
+Write-Host "  WS ID 是在 Weave 中创建 AI 联系人时生成的标识符。"
+Write-Host "  获取方式: Weave 网站 -> 联系人菜单 -> 添加 AI 联系人 -> 复制 WS ID"
+Write-Host ""
+while ($true) {
+    $inputId = Read-Host "  Weave WS ID"
+    if ($inputId) {
+        Set-EnvValue "WEAVE_WS_ID" $inputId
+        Write-Ok "WEAVE_WS_ID 已更新"
+        break
     }
+    if ($existingId) {
+        Write-Ok "WEAVE_WS_ID 保留: $preview"
+        break
+    }
+    Write-Warn "WS ID 不能为空"
 }
 
 # WEAVE_API_KEY（可选）
 $existingKey = Get-EnvValue "WEAVE_API_KEY"
 if ($existingKey) {
-    Write-Ok "WEAVE_API_KEY 已存在（保留）"
+    Write-Host "  当前 WEAVE_API_KEY: ******（已设置）"
+}
+$inputKey = Read-Host "  API Key（可选，直接回车跳过）"
+if ($inputKey) {
+    Set-EnvValue "WEAVE_API_KEY" $inputKey
+    Write-Ok "WEAVE_API_KEY 已更新"
+} elseif ($existingKey) {
+    Write-Ok "WEAVE_API_KEY 保留（已设置）"
 } else {
-    $inputKey = Read-Host "  API Key（可选，直接回车跳过）"
-    if ($inputKey) {
-        Set-EnvIfAbsent "WEAVE_API_KEY" $inputKey
-    } else {
-        Write-Info "跳过 API Key（演示模式，无需认证）"
-    }
+    Write-Info "跳过 API Key（演示模式，无需认证）"
 }
 
 Write-Host ""
