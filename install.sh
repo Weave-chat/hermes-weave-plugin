@@ -4,12 +4,10 @@
 #   或: git clone https://github.com/Weave-chat/hermes-weave-plugin && bash install.sh
 set -e
 
-# curl | bash 模式下 stdin 是管道，重定向到终端以支持交互输入
+# curl | bash 模式下 stdin 是管道，read 命令需要从 /dev/tty 读取
+# 不能用 exec 0</dev/tty 重定向（会断开 curl 管道导致 curl: (23)）
 if ! [ -t 0 ]; then
-    # 用子 shell 测试 /dev/tty 是否可读（[ -e ] 只检查文件存在，不检查可访问性）
-    if (exec 0</dev/tty) 2>/dev/null; then
-        exec 0</dev/tty
-    else
+    if ! (exec 0</dev/tty) 2>/dev/null; then
         echo "无法访问终端，请手动下载运行:"
         echo "  curl -o /tmp/install.sh https://raw.githubusercontent.com/Weave-chat/hermes-weave-plugin/main/install.sh"
         echo "  bash /tmp/install.sh"
@@ -111,7 +109,7 @@ echo ""
 
 # 选择 profile
 while true; do
-    read -p "  请选择 Profile 序号 [1-${#PROFILES[@]}]: " choice
+    read -p "  请选择 Profile 序号 [1-${#PROFILES[@]}]: " choice < /dev/tty
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#PROFILES[@]} ]; then
         SELECTED_PROFILE="${PROFILES[$((choice-1))]}"
         break
@@ -129,7 +127,7 @@ ok "安装路径: $PLUGIN_DIR"
 echo ""
 
 # 确认
-read -p "  确认安装到 $SELECTED_PROFILE? [Y/n]: " confirm
+read -p "  确认安装到 $SELECTED_PROFILE? [Y/n]: " confirm < /dev/tty
 [[ "$confirm" =~ ^[Nn] ]] && { echo "已取消。"; exit 0; }
 echo ""
 
@@ -220,7 +218,7 @@ echo ""
 EXISTING_URL=$(get_env "WEAVE_WS_URL")
 DEFAULT_URL="${EXISTING_URL:-wss://www.weaveai.chat}"
 echo "  当前 WEAVE_WS_URL: $DEFAULT_URL"
-read -p "  Weave WebSocket URL: " input_url
+read -p "  Weave WebSocket URL: " input_url < /dev/tty
 if [ -n "$input_url" ]; then
     set_env "WEAVE_WS_URL" "$input_url"
     ok "WEAVE_WS_URL 已更新: $input_url"
@@ -241,7 +239,7 @@ echo "  WS ID 是在 Weave 中创建 AI 联系人时生成的标识符。"
 echo "  获取方式: Weave 网站 -> 联系人菜单 -> 添加 AI 联系人 -> 复制 WS ID"
 echo ""
 while true; do
-    read -p "  Weave WS ID: " input_id
+    read -p "  Weave WS ID: " input_id < /dev/tty
     if [ -n "$input_id" ]; then
         set_env "WEAVE_WS_ID" "$input_id"
         ok "WEAVE_WS_ID 已更新"
@@ -259,7 +257,7 @@ EXISTING_KEY=$(get_env "WEAVE_API_KEY")
 if [ -n "$EXISTING_KEY" ]; then
     echo "  当前 WEAVE_API_KEY: ******（已设置）"
 fi
-read -p "  API Key（可选，直接回车跳过）: " input_key
+read -p "  API Key（可选，直接回车跳过）: " input_key < /dev/tty
 if [ -n "$input_key" ]; then
     set_env "WEAVE_API_KEY" "$input_key"
     ok "WEAVE_API_KEY 已更新"
