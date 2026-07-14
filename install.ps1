@@ -184,7 +184,7 @@ while ($true) {
 }
 
 $profileDir = Join-Path $profilesDir $selectedProfile
-$pluginDir = Join-Path $hermesHome "plugins\platforms\weave"
+$pluginDir = Join-Path $profileDir "plugins\weave-platform"
 $envFile = Join-Path $profileDir ".env"
 $configFile = Join-Path $profileDir "config.yaml"
 
