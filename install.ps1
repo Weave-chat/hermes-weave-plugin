@@ -1,0 +1,546 @@
+#!/usr/bin/env pwsh
+# Hermes Weave Plugin 安装脚本 - Windows PowerShell
+# 用法: irm https://raw.githubusercontent.com/Weave-chat/hermes-weave-plugin/main/install.ps1 | iex
+#   或: git clone https://github.com/Weave-chat/hermes-weave-plugin && powershell -ExecutionPolicy Bypass -File install.ps1
+$ErrorActionPreference = "Stop"
+
+# irm | iex 模式下 Read-Host 可能不阻塞，用轮询 + Start-Sleep 兜底
+function Wait-BeforeExit {
+    Write-Host "按任意键退出（15 秒后自动关闭）..."
+    try {
+        $start = Get-Date
+        while (((Get-Date) - $start).TotalSeconds -lt 15) {
+            if ([Console]::KeyAvailable) {
+                [Console]::ReadKey($true) | Out-Null
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    } catch {
+        Start-Sleep -Seconds 15
+    }
+}
+
+# irm | iex 模式下脚本结束或出错会直接关闭窗口，用 trap 捕获意外错误并暂停
+trap {
+    Write-Host ""
+    Write-Host "[x] 错误: $_" -ForegroundColor Red
+    Wait-BeforeExit
+    exit 1
+}
+
+# ── 辅助函数 ──
+function Write-Info  { param([string]$msg) Write-Host "[i] $msg" -ForegroundColor Cyan }
+function Write-Ok    { param([string]$msg) Write-Host "[v] $msg" -ForegroundColor Green }
+function Write-Warn  { param([string]$msg) Write-Host "[!] $msg" -ForegroundColor Yellow }
+function Write-Fail  {
+    param([string]$msg)
+    Write-Host "[x] $msg" -ForegroundColor Red
+    Wait-BeforeExit
+    exit 1
+}
+
+# UTF-8 无 BOM 编码（写 .env 和 config.yaml 时使用，避免 Python 读取时 BOM 导致 key 解析错误）
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
+Write-Host ""
+Write-Host "==========================================" -ForegroundColor White
+Write-Host "   Hermes Weave Plugin 安装程序          " -ForegroundColor White
+Write-Host "==========================================" -ForegroundColor White
+Write-Host ""
+
+# ═══════════════════════════════════════════
+# [1/6] 环境检查
+# ═══════════════════════════════════════════
+Write-Info "[1/6] 环境检查..."
+
+# Python（Windows 上优先 python，然后 py launcher）
+$pythonCmd = $null
+foreach ($cmd in @("python", "python3", "py")) {
+    if (Get-Command $cmd -ErrorAction SilentlyContinue) {
+        $pythonCmd = $cmd
+        break
+    }
+}
+if (-not $pythonCmd) {
+    Write-Fail "未找到 Python，请先安装 Python 3.10+"
+}
+$pythonVersion = & $pythonCmd --version 2>&1
+Write-Ok "Python: $pythonVersion"
+
+# 检测用户目录（Windows 用 USERPROFILE，不会被 Hermes profile 覆盖）
+$realHome = $env:USERPROFILE
+if (-not $realHome) {
+    $realHome = & $pythonCmd -c "import os; print(os.path.expanduser('~'))" 2>$null
+}
+if (-not $realHome) {
+    Write-Fail "无法确定用户目录"
+}
+$hermesHome = Join-Path $realHome ".hermes"
+
+# Hermes CLI 检测：找到可执行文件后用 hermes status 确认可用
+$hermes = $null
+if (Get-Command hermes -ErrorAction SilentlyContinue) {
+    $hermes = "hermes"
+} else {
+    # 检查常见安装路径（优先级：.local/bin > hermes-agent venv）
+    $hermesPaths = @(
+        "$realHome\.local\bin\hermes.exe",
+        "$realHome\.local\bin\hermes.cmd",
+        "$realHome\.hermes\hermes-agent\venv\Scripts\hermes.exe",
+        "$realHome\.hermes\hermes-agent\venv\Scripts\hermes.cmd"
+    )
+    foreach ($p in $hermesPaths) {
+        if (Test-Path $p) {
+            $hermes = $p
+            break
+        }
+    }
+}
+
+if ($hermes) {
+    # 运行 hermes status 确认安装情况
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $statusOutput = & $hermes status 2>&1
+        $statusOk = ($LASTEXITCODE -eq 0)
+    } catch {
+        $statusOk = $false
+        $statusOutput = $_
+    }
+    $ErrorActionPreference = $prevEAP
+
+    if ($statusOk) {
+        Write-Ok "Hermes CLI: $hermes"
+        # 从 status 输出提取 Project 路径
+        $projectPath = $null
+        foreach ($line in $statusOutput) {
+            if ($line -match "Project:\s+(.+)") {
+                $projectPath = $matches[1].Trim()
+                break
+            }
+        }
+        if ($projectPath) {
+            Write-Ok "Hermes 安装路径: $projectPath"
+            # Project 路径格式: <hermesHome>/hermes-agent，去掉末尾的 hermes-agent
+            $hermesHome = $projectPath -replace "[/\\]hermes-agent\s*$", ""
+        }
+    } else {
+        Write-Warn "Hermes CLI 已找到但 status 命令执行失败，可能安装不完整"
+        $hermes = $null
+    }
+} else {
+    Write-Warn "未找到 hermes CLI（插件仍可安装，但需要手动启用）"
+}
+
+# Hermes home 目录
+Write-Ok "Hermes Home: $hermesHome"
+if (-not (Test-Path $hermesHome)) {
+    Write-Fail "Hermes 目录不存在: $hermesHome（请先安装 Hermes Agent）"
+}
+
+# ═══════════════════════════════════════════
+# [2/6] 选择 Profile
+# ═══════════════════════════════════════════
+Write-Info "[2/6] 选择 Profile..."
+
+$profilesDir = Join-Path $hermesHome "profiles"
+if (-not (Test-Path $profilesDir)) {
+    Write-Fail "Profile 目录不存在: $profilesDir"
+}
+
+# 收集所有 profile（排除 backups 等非 profile 目录）
+$profiles = @()
+Get-ChildItem $profilesDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    $name = $_.Name
+    if ($name -eq "backups") { return }
+    $hasConfig = Test-Path (Join-Path $_.FullName "config.yaml")
+    $hasEnv = Test-Path (Join-Path $_.FullName ".env")
+    if ($hasConfig -or $hasEnv) {
+        $profiles += $name
+    }
+}
+
+if ($profiles.Count -eq 0) {
+    Write-Fail "未找到任何 Profile（请先创建: hermes -p <name> init）"
+}
+
+Write-Host ""
+Write-Host "  可用的 Profile:"
+for ($i = 0; $i -lt $profiles.Count; $i++) {
+    Write-Host "  $($i+1). $($profiles[$i])"
+}
+Write-Host ""
+
+# 选择 profile
+while ($true) {
+    $choice = Read-Host "  请选择 Profile 序号 [1-$($profiles.Count)]"
+    if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $profiles.Count) {
+        $selectedProfile = $profiles[[int]$choice - 1]
+        break
+    }
+    Write-Warn "无效输入，请输入 1-$($profiles.Count) 之间的数字"
+}
+
+$profileDir = Join-Path $profilesDir $selectedProfile
+$pluginDir = Join-Path $profileDir "plugins\weave-platform"
+$envFile = Join-Path $profileDir ".env"
+$configFile = Join-Path $profileDir "config.yaml"
+
+Write-Ok "Profile: $selectedProfile"
+Write-Ok "安装路径: $pluginDir"
+Write-Host ""
+
+# 确认
+$confirm = Read-Host "  确认安装到 $selectedProfile? [Y/n]"
+if ($confirm -match '^[Nn]') {
+    Write-Host "已取消。"
+    exit 0
+}
+Write-Host ""
+
+# ═══════════════════════════════════════════
+# [3/6] 下载插件
+# ═══════════════════════════════════════════
+Write-Info "[3/6] 下载插件..."
+
+$repoUrl = "https://github.com/Weave-chat/hermes-weave-plugin"
+$giteeUrl = "https://gitee.com/weaveai/hermes-weave-plugin"
+$tmpDir = Join-Path $env:TEMP "weave_install_$(Get-Random)"
+New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+
+try {
+    $clonePath = Join-Path $tmpDir "weave"
+    $downloadOk = $false
+
+    # 下载源：GitHub 优先，Gitee 兜底（国内网络）
+    $sources = @(
+        @{ url = $repoUrl;   name = "GitHub"; zip = "/archive/refs/heads/main.zip" }
+        @{ url = $giteeUrl;  name = "Gitee";  zip = "/repository/archive/main.zip" }
+    )
+
+    # 外部命令的 stderr 在 Stop 模式下会触发 trap，下载期间临时关闭
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+
+    foreach ($src in $sources) {
+        if ($downloadOk) { break }
+
+        # 尝试 git clone
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            Write-Info "尝试 $($src.name) git clone..."
+            & git clone --depth 1 "$($src.url).git" $clonePath 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "$($src.name) git clone 完成"
+                $downloadOk = $true
+                continue
+            }
+            Write-Warn "$($src.name) git clone 失败"
+        }
+
+        # 尝试 ZIP 下载
+        $zipUrl = "$($src.url)$($src.zip)"
+        $zipPath = Join-Path $tmpDir "weave.zip"
+        Write-Info "尝试 $($src.name) ZIP 下载..."
+        try {
+            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+            Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
+            $extractedDir = Get-ChildItem $tmpDir -Directory | Where-Object { $_.Name -like "hermes-weave-plugin*" } | Select-Object -First 1
+            if ($extractedDir) {
+                Move-Item $extractedDir.FullName $clonePath
+            }
+            Write-Ok "$($src.name) ZIP 下载完成"
+            $downloadOk = $true
+        } catch {
+            Write-Warn "$($src.name) ZIP 下载失败: $_"
+        }
+    }
+
+    $ErrorActionPreference = $prevEAP
+
+    if (-not $downloadOk) {
+        Write-Fail "无法下载插件（GitHub 和 Gitee 均不可达）。请手动下载:`n  1. 浏览器打开: $repoUrl/releases`n  2. 下载 ZIP 并解压到: $pluginDir`n  3. 重新运行此脚本"
+    }
+
+    # 检查下载内容
+    if (-not (Test-Path (Join-Path $clonePath "plugin.yaml"))) {
+        Write-Fail "下载的文件不完整（缺少 plugin.yaml）"
+    }
+    if (-not (Test-Path (Join-Path $clonePath "adapter.py"))) {
+        Write-Fail "下载的文件不完整（缺少 adapter.py）"
+    }
+
+    # 安装到目标路径
+    $pluginsParent = Split-Path $pluginDir -Parent
+    if (-not (Test-Path $pluginsParent)) {
+        New-Item -ItemType Directory -Path $pluginsParent -Force | Out-Null
+    }
+    if (Test-Path $pluginDir) {
+        Remove-Item $pluginDir -Recurse -Force
+    }
+    Copy-Item -Path $clonePath -Destination $pluginDir -Recurse
+    Write-Ok "已安装到 $pluginDir"
+} finally {
+    if (Test-Path $tmpDir) {
+        Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ═══════════════════════════════════════════
+# [4/6] 配置环境变量
+# ═══════════════════════════════════════════
+Write-Info "[4/6] 配置环境变量..."
+
+# 确保配置文件存在
+if (-not (Test-Path $envFile)) {
+    [System.IO.File]::WriteAllText($envFile, "", $utf8NoBom)
+}
+
+# 读取已有值（不覆盖）
+function Get-EnvValue {
+    param([string]$key)
+    if (Test-Path $envFile) {
+        $lines = Get-Content $envFile -ErrorAction SilentlyContinue
+        foreach ($line in $lines) {
+            if ($line -match "^$key=(.*)$") {
+                return $matches[1]
+            }
+        }
+    }
+    return $null
+}
+
+# 写入环境变量（已存在则替换，不存在则追加）
+function Set-EnvValue {
+    param([string]$key, [string]$val)
+    if (Test-Path $envFile) {
+        $content = Get-Content $envFile -Raw -ErrorAction SilentlyContinue
+        if ($content -and ($content -match "(?m)^$key=.*$")) {
+            $content = $content -replace "(?m)^$key=.*$", "$key=$val"
+            [System.IO.File]::WriteAllText($envFile, $content, $utf8NoBom)
+        } else {
+            [System.IO.File]::AppendAllText($envFile, "$key=$val`n", $utf8NoBom)
+        }
+    } else {
+        [System.IO.File]::WriteAllText($envFile, "$key=$val`n", $utf8NoBom)
+    }
+}
+
+Write-Host ""
+Write-Host "  请输入 Weave 连接配置（直接回车保留当前值）:"
+Write-Host ""
+
+# WEAVE_WS_URL
+$existingUrl = Get-EnvValue "WEAVE_WS_URL"
+$defaultUrl = "wss://www.weaveai.chat"
+if ($existingUrl) {
+    Write-Host "  当前 WEAVE_WS_URL: $existingUrl"
+}
+Write-Host "  默认值: $defaultUrl"
+Write-Host "  （仅填 scheme://host[:port]，路径会自动拼接）"
+Write-Host ""
+$finalWsUrl = $null
+while ($true) {
+    $inputUrl = Read-Host "  Weave WebSocket URL (回车使用默认值)"
+    if (-not $inputUrl) {
+        # 规范化默认值：去除尾部斜杠和路径
+        $finalWsUrl = $defaultUrl -replace '/+$',''
+        $finalWsUrl = $finalWsUrl -replace '^(wss?://[^/]+).*$','$1'
+        break
+    }
+    # 规范化：去除尾部斜杠和路径
+    $inputUrl = $inputUrl -replace '/+$',''
+    $inputUrl = $inputUrl -replace '^(wss?://[^/]+).*$','$1'
+    # 协议校验
+    if ($inputUrl -notmatch '^wss?://') {
+        Write-Warn "URL 必须以 ws:// 或 wss:// 开头，请重新输入"
+        continue
+    }
+    # 提取 host
+    $wsHost = ($inputUrl -replace '^wss?://','' -replace '/.*$','' -replace ':.*$','')
+    # 公网域名检查
+    if ($wsHost -notin @("localhost","127.0.0.1","0.0.0.0")) {
+        # 常见域名拼写检测
+        if ($wsHost -match '\.cht($|:)') {
+            $fixedUrl = $inputUrl -replace '\.cht','.chat'
+            Write-Warn "检测到域名以 .cht 结尾，可能是 .chat 的拼写错误"
+            Write-Host "    输入值: $inputUrl"
+            Write-Host "    建议值: $fixedUrl"
+            $typoConfirm = Read-Host "    使用建议值？[Y/n]"
+            if ($typoConfirm -notmatch '^[Nn]') { $inputUrl = $fixedUrl }
+        }
+        # ws:// 明文安全提示
+        if ($inputUrl -match '^ws://') {
+            Write-Warn "公网域名使用 ws:// 为明文传输，建议使用 wss://（加密）"
+            $wsConfirm = Read-Host "    是否自动改为 wss://？[Y/n]"
+            if ($wsConfirm -notmatch '^[Nn]') { $inputUrl = $inputUrl -replace '^ws://','wss://' }
+        }
+    }
+    $finalWsUrl = $inputUrl
+    break
+}
+Set-EnvValue "WEAVE_WS_URL" $finalWsUrl
+Write-Ok "WEAVE_WS_URL: $finalWsUrl"
+
+# WEAVE_WS_ID
+$existingId = Get-EnvValue "WEAVE_WS_ID"
+if ($existingId) {
+    $preview = $existingId
+    if ($existingId.Length -gt 12) { $preview = $existingId.Substring(0, 12) + "..." }
+    Write-Host "  当前 WEAVE_WS_ID: $preview"
+}
+Write-Host ""
+Write-Host "  WS ID 是在 Weave 中创建 AI 联系人时生成的标识符。"
+Write-Host "  获取方式: Weave 网站 -> 联系人菜单 -> 添加 AI 联系人 -> 复制 WS ID"
+Write-Host ""
+$finalWsId = $null
+while ($true) {
+    $inputId = Read-Host "  Weave WS ID"
+    if (-not $inputId) {
+        if ($existingId) {
+            $finalWsId = $existingId
+            Write-Ok "WEAVE_WS_ID 保留: $preview"
+            break
+        }
+        Write-Warn "WS ID 不能为空"
+        continue
+    }
+    Set-EnvValue "WEAVE_WS_ID" $inputId
+    Write-Ok "WEAVE_WS_ID 已更新"
+    $finalWsId = $inputId
+    break
+}
+
+# WEAVE_API_KEY（可选）
+$existingKey = Get-EnvValue "WEAVE_API_KEY"
+if ($existingKey) {
+    Write-Host "  当前 WEAVE_API_KEY: ******（已设置）"
+}
+$inputKey = Read-Host "  API Key（可选，直接回车跳过）"
+if ($inputKey) {
+    Set-EnvValue "WEAVE_API_KEY" $inputKey
+    Write-Ok "WEAVE_API_KEY 已更新"
+} elseif ($existingKey) {
+    Write-Ok "WEAVE_API_KEY 保留（已设置）"
+} else {
+    Write-Info "跳过 API Key（演示模式，无需认证）"
+}
+
+Write-Host ""
+
+# ═══════════════════════════════════════════
+# [5/6] 启用插件
+# ═══════════════════════════════════════════
+Write-Info "[5/6] 启用插件..."
+
+$enablePluginManually = $false
+
+# 方式一：优先用 hermes CLI
+if ($hermes) {
+    $enabled = & $hermes -p $selectedProfile plugins list 2>$null | Select-String "weave-platform" | Select-Object -First 1
+    if ($enabled -match "enabled") {
+        Write-Ok "weave-platform 已启用"
+    } elseif ($enabled) {
+        # 已安装但未启用
+        & $hermes -p $selectedProfile plugins enable weave-platform 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "已通过 CLI 启用"
+        } else {
+            Write-Warn "CLI 启用失败，尝试手动修改 config.yaml..."
+            $enablePluginManually = $true
+        }
+    } else {
+        # 未安装到 hermes 的插件系统，手动修改 config.yaml
+        $enablePluginManually = $true
+    }
+} else {
+    $enablePluginManually = $true
+}
+
+# 方式二：手动修改 config.yaml
+if ($enablePluginManually) {
+    if (-not (Test-Path $configFile)) {
+        # config.yaml 不存在，创建
+        $yamlContent = @"
+plugins:
+  enabled:
+  - weave-platform
+  disabled: []
+"@
+        [System.IO.File]::WriteAllText($configFile, $yamlContent, $utf8NoBom)
+        Write-Ok "已创建 config.yaml 并启用 weave-platform"
+    } else {
+        # 检查是否已启用
+        $content = Get-Content $configFile -Raw -ErrorAction SilentlyContinue
+        if ($content -match "weave-platform") {
+            Write-Ok "config.yaml 中已有 weave-platform"
+        } else {
+            # 用 python 安全修改 YAML
+            $pyScript = @"
+import yaml
+config_path = r'$configFile'
+try:
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f) or {}
+except Exception:
+    config = {}
+if 'plugins' not in config:
+    config['plugins'] = {'enabled': [], 'disabled': []}
+if 'enabled' not in config['plugins']:
+    config['plugins']['enabled'] = []
+if 'disabled' not in config['plugins']:
+    config['plugins']['disabled'] = []
+if 'weave-platform' not in config['plugins']['enabled']:
+    config['plugins']['enabled'].append('weave-platform')
+    if 'weave-platform' in config['plugins'].get('disabled', []):
+        config['plugins']['disabled'].remove('weave-platform')
+with open(config_path, 'w') as f:
+    yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+print('OK')
+"@
+            $result = & $pythonCmd -c $pyScript 2>&1
+            if ($result -match "OK") {
+                Write-Ok "已在 config.yaml 中启用 weave-platform"
+            } else {
+                Write-Warn "自动修改 config.yaml 失败，请手动添加 weave-platform 到 plugins.enabled"
+                Write-Warn "$result"
+            }
+        }
+    }
+}
+
+# ═══════════════════════════════════════════
+# [6/6] 完成
+# ═══════════════════════════════════════════
+Write-Host ""
+Write-Host "==========================================" -ForegroundColor Green
+Write-Host "          安装完成！                      " -ForegroundColor Green
+Write-Host "==========================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "  配置摘要:"
+Write-Host "    Profile:    $selectedProfile"
+Write-Host "    插件路径:   $pluginDir"
+Write-Host "    环境变量:   $envFile"
+Write-Host "    WS URL:     $(Get-EnvValue 'WEAVE_WS_URL')"
+$wsId = Get-EnvValue 'WEAVE_WS_ID'
+if ($wsId) {
+    $wsIdPreview = $wsId
+    if ($wsId.Length -gt 12) { $wsIdPreview = $wsId.Substring(0, 12) }
+    Write-Host "    WS ID:      ${wsIdPreview}..."
+}
+Write-Host ""
+$wsUrlFinal = Get-EnvValue 'WEAVE_WS_URL'
+if ($wsUrlFinal -and $wsId) {
+    $wsIdShort = if ($wsId.Length -gt 8) { $wsId.Substring(0, 8) } else { $wsId }
+    Write-Host "    完整连接地址:"
+    Write-Host "    ${wsUrlFinal}/api/v1/ai-contacts/ws/agent/${wsIdShort}..."
+}
+Write-Host ""
+Write-Host "  下一步: 重启网关使插件生效"
+Write-Host ""
+Write-Host "    hermes -p $selectedProfile gateway run --replace"
+Write-Host ""
+Write-Host "  详细文档: https://www.weaveai.chat/docs/hermes"
+Write-Host ""
+Wait-BeforeExit

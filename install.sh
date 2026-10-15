@@ -1,0 +1,437 @@
+#!/bin/bash
+# Hermes Weave Plugin 安装脚本 - macOS / Linux
+# 用法: curl -sSL https://gitee.com/weaveai/hermes-weave-plugin/raw/main/install.sh | bash
+#   或: git clone https://gitee.com/weaveai/hermes-weave-plugin && bash install.sh
+# (Gitee 为主源,国内可达;GitHub Weave-chat/hermes-weave-plugin 为海外镜像)
+set -e
+
+# curl | bash 模式下 stdin 是管道，read 命令需要从 /dev/tty 读取
+# 不能用 exec 0</dev/tty 重定向（会断开 curl 管道导致 curl: (23)）
+if ! [ -t 0 ]; then
+    if ! (exec 0</dev/tty) 2>/dev/null; then
+        echo "无法访问终端，请手动下载运行:"
+        echo "  curl -o /tmp/install.sh https://gitee.com/weaveai/hermes-weave-plugin/raw/main/install.sh"
+        echo "  bash /tmp/install.sh"
+        exit 1
+    fi
+fi
+
+REPO="https://github.com/Weave-chat/hermes-weave-plugin"
+# HERMES_HOME 始终指向 ~/.hermes 根目录（不使用环境变量，因为 profile 下会覆盖）
+HERMES_HOME=""
+
+# ── 颜色 ──
+if [ -t 1 ]; then
+    CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+    RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
+else
+    CYAN=''; GREEN=''; YELLOW=''; RED=''; BOLD=''; NC=''
+fi
+
+info()  { echo -e "${CYAN}ℹ${NC}  $1"; }
+ok()    { echo -e "${GREEN}✓${NC}  $1"; }
+warn()  { echo -e "${YELLOW}⚠${NC}  $1"; }
+fail()  { echo -e "${RED}✗${NC}  $1"; exit 1; }
+
+echo ""
+echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}║   Hermes Weave Plugin 安装程序          ║${NC}"
+echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
+echo ""
+
+# ═══════════════════════════════════════════
+# [1/6] 环境检查
+# ═══════════════════════════════════════════
+info "[1/6] 环境检查..."
+
+# Python
+if command -v python3 &>/dev/null; then
+    PYTHON="python3"
+elif command -v python &>/dev/null; then
+    PYTHON="python"
+else
+    fail "未找到 Python，请先安装 Python 3.10+"
+fi
+ok "Python: $($PYTHON --version 2>&1)"
+
+# 检测真实用户目录（Hermes profile 可能覆盖 $HOME）
+REAL_HOME=$($PYTHON -c "import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)" 2>/dev/null || echo "$HOME")
+HERMES_HOME="$REAL_HOME/.hermes"
+
+# Hermes CLI
+HERMES=""
+if command -v hermes &>/dev/null; then
+    HERMES="hermes"
+elif [ -x "$HOME/.local/bin/hermes" ]; then
+    HERMES="$HOME/.local/bin/hermes"
+fi
+if [ -n "$HERMES" ]; then
+    ok "Hermes CLI: $HERMES"
+else
+    warn "未找到 hermes CLI（插件仍可安装，但需要手动启用）"
+fi
+
+# Hermes home 目录
+if [ ! -d "$HERMES_HOME" ]; then
+    fail "Hermes 目录不存在: $HERMES_HOME（请先安装 Hermes Agent）"
+fi
+ok "Hermes Home: $HERMES_HOME"
+
+# ═══════════════════════════════════════════
+# [2/6] 选择 Profile
+# ═══════════════════════════════════════════
+info "[2/6] 选择 Profile..."
+
+PROFILES_DIR="$HERMES_HOME/profiles"
+if [ ! -d "$PROFILES_DIR" ]; then
+    fail "Profile 目录不存在: $PROFILES_DIR"
+fi
+
+# 收集所有 profile（排除 backups 等非 profile 目录）
+PROFILES=()
+for d in "$PROFILES_DIR"/*/; do
+    name=$(basename "$d")
+    # 跳过明显不是 profile 的目录
+    [ "$name" = "backups" ] && continue
+    [ -f "${d}config.yaml" ] || [ -f "${d}.env" ] || continue
+    PROFILES+=("$name")
+done
+
+if [ ${#PROFILES[@]} -eq 0 ]; then
+    fail "未找到任何 Profile（请先创建: hermes -p <name> init）"
+fi
+
+echo ""
+echo "  可用的 Profile:"
+for i in "${!PROFILES[@]}"; do
+    echo "  $((i+1)). ${PROFILES[$i]}"
+done
+echo ""
+
+# 选择 profile
+while true; do
+    read -p "  请选择 Profile 序号 [1-${#PROFILES[@]}]: " choice < /dev/tty
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#PROFILES[@]} ]; then
+        SELECTED_PROFILE="${PROFILES[$((choice-1))]}"
+        break
+    fi
+    warn "无效输入，请输入 1-${#PROFILES[@]} 之间的数字"
+done
+
+PROFILE_DIR="$PROFILES_DIR/$SELECTED_PROFILE"
+PLUGIN_DIR="$HERMES_HOME/profiles/$SELECTED_PROFILE/plugins/weave-platform"
+ENV_FILE="$PROFILE_DIR/.env"
+CONFIG_FILE="$PROFILE_DIR/config.yaml"
+
+ok "Profile: $SELECTED_PROFILE"
+ok "安装路径: $PLUGIN_DIR"
+echo ""
+
+# 确认
+read -p "  确认安装到 $SELECTED_PROFILE? [Y/n]: " confirm < /dev/tty
+[[ "$confirm" =~ ^[Nn] ]] && { echo "已取消。"; exit 0; }
+echo ""
+
+# ═══════════════════════════════════════════
+# [3/6] 下载插件
+# ═══════════════════════════════════════════
+info "[3/6] 下载插件..."
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+GITEE_REPO="https://gitee.com/weaveai/hermes-weave-plugin"
+DOWNLOAD_OK=0
+
+# 下载源：Gitee 优先（国内可达），GitHub 镜像兜底（海外网络）
+for SRC_REPO in "$GITEE_REPO" "$REPO"; do
+    [ "$DOWNLOAD_OK" = "1" ] && break
+
+    # 尝试 git clone
+    if command -v git &>/dev/null; then
+        info "尝试 git clone: $SRC_REPO ..."
+        if git clone --depth 1 "$SRC_REPO" "$TMP_DIR/weave" 2>&1; then
+            ok "git clone 完成"
+            DOWNLOAD_OK=1
+            continue
+        fi
+        warn "git clone 失败: $SRC_REPO"
+    fi
+
+    # 尝试 curl 下载归档（Gitee 与 GitHub 的归档路径不同，解出目录名同为 <repo>-main）
+    if command -v curl &>/dev/null; then
+        if [[ "$SRC_REPO" == *"gitee.com"* ]]; then
+            ARCHIVE_URL="$SRC_REPO/repository/archive/main.tar.gz"
+        else
+            ARCHIVE_URL="$SRC_REPO/archive/refs/heads/main.tar.gz"
+        fi
+        info "尝试下载归档: $SRC_REPO ..."
+        if curl -sSL --max-time 30 "$ARCHIVE_URL" | tar xz -C "$TMP_DIR" 2>/dev/null; then
+            mv "$TMP_DIR/hermes-weave-plugin-main" "$TMP_DIR/weave"
+            ok "下载完成"
+            DOWNLOAD_OK=1
+            continue
+        fi
+        warn "下载失败: $SRC_REPO"
+    fi
+done
+
+if [ "$DOWNLOAD_OK" = "0" ]; then
+    fail "无法下载插件（GitHub 和 Gitee 均不可达）。请手动下载:
+  1. 浏览器打开: $REPO/releases
+  2. 下载 ZIP 并解压到: $PLUGIN_DIR
+  3. 重新运行此脚本"
+fi
+
+# 检查下载内容
+[ -f "$TMP_DIR/weave/plugin.yaml" ] || fail "下载的文件不完整（缺少 plugin.yaml）"
+[ -f "$TMP_DIR/weave/adapter.py" ] || fail "下载的文件不完整（缺少 adapter.py）"
+
+# 安装到目标路径
+mkdir -p "$(dirname "$PLUGIN_DIR")"
+rm -rf "$PLUGIN_DIR"
+cp -r "$TMP_DIR/weave" "$PLUGIN_DIR"
+ok "已安装到 $PLUGIN_DIR"
+
+# 安装 Python 依赖（websockets）
+info "检查 Python 依赖 (websockets)..."
+HERMES_VENV="$REAL_HOME/.hermes/hermes-agent/venv"
+if [ -x "$HERMES_VENV/bin/pip" ]; then
+    "$HERMES_VENV/bin/pip" install -q websockets 2>/dev/null && ok "websockets 已安装到 Hermes venv" || warn "websockets 安装失败，请手动: $HERMES_VENV/bin/pip install websockets"
+elif "$PYTHON" -c "import websockets" 2>/dev/null; then
+    ok "websockets 已安装"
+else
+    "$PYTHON" -m pip install -q websockets 2>/dev/null && ok "websockets 安装完成" || warn "websockets 安装失败，请手动: pip install websockets"
+fi
+
+# ═══════════════════════════════════════════
+# [4/6] 配置环境变量
+# ═══════════════════════════════════════════
+info "[4/6] 配置环境变量..."
+
+# 确保配置文件存在
+touch "$ENV_FILE"
+
+# 读取已有值（不覆盖）
+get_env() {
+    grep "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d'=' -f2-
+}
+
+# 写入环境变量（已存在则替换，不存在则追加）
+set_env() {
+    local key="$1" val="$2"
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i.bak "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
+    else
+        echo "${key}=${val}" >> "$ENV_FILE"
+    fi
+}
+
+echo ""
+echo "  请输入 Weave 连接配置（直接回车保留当前值）:"
+echo ""
+
+# ── WS URL 规范化：去除尾部斜杠和路径（适配器会自动拼接） ──
+normalize_ws_url() {
+    local url="$1"
+    url="${url%/}"
+    url=$(echo "$url" | sed -E 's|^(wss?://[^/]+).*|\1|')
+    echo "$url"
+}
+
+# WEAVE_WS_URL
+EXISTING_URL=$(get_env "WEAVE_WS_URL")
+DEFAULT_URL="wss://www.weaveai.chat"
+if [ -n "$EXISTING_URL" ]; then
+    echo "  当前 WEAVE_WS_URL: $EXISTING_URL"
+fi
+echo "  默认值: $DEFAULT_URL"
+echo "  （仅填 scheme://host[:port]，路径会自动拼接）"
+echo ""
+FINAL_WS_URL=""
+while true; do
+    read -p "  Weave WebSocket URL (回车使用默认值): " input_url < /dev/tty
+    if [ -z "$input_url" ]; then
+        FINAL_WS_URL=$(normalize_ws_url "$DEFAULT_URL")
+        break
+    fi
+    # 规范化
+    input_url=$(normalize_ws_url "$input_url")
+    # 协议校验
+    if ! echo "$input_url" | grep -qE '^wss?://'; then
+        warn "URL 必须以 ws:// 或 wss:// 开头，请重新输入"
+        continue
+    fi
+    # 提取 host
+    ws_host=$(echo "$input_url" | sed -E 's|^wss?://||' | sed -E 's|(/.*)||' | sed -E 's|:.*||')
+    # 公网域名检查
+    if [ "$ws_host" != "localhost" ] && [ "$ws_host" != "127.0.0.1" ] && [ "$ws_host" != "0.0.0.0" ]; then
+        # 常见域名拼写检测
+        if echo "$ws_host" | grep -qiE '\.cht($|:)'; then
+            fixed_url=$(echo "$input_url" | sed 's/\.cht/\.chat/')
+            warn "检测到域名以 .cht 结尾，可能是 .chat 的拼写错误"
+            echo "    输入值: $input_url"
+            echo "    建议值: $fixed_url"
+            read -p "    使用建议值？[Y/n]: " typo_confirm < /dev/tty
+            [[ "$typo_confirm" =~ ^[Nn] ]] || input_url="$fixed_url"
+        fi
+        # ws:// 明文安全提示
+        if echo "$input_url" | grep -q '^ws://'; then
+            warn "公网域名使用 ws:// 为明文传输，建议使用 wss://（加密）"
+            read -p "    是否自动改为 wss://？[Y/n]: " ws_confirm < /dev/tty
+            if [[ ! "$ws_confirm" =~ ^[Nn] ]]; then
+                input_url=$(echo "$input_url" | sed 's/^ws:\/\//wss:\/\//')
+            fi
+        fi
+    fi
+    FINAL_WS_URL="$input_url"
+    break
+done
+set_env "WEAVE_WS_URL" "$FINAL_WS_URL"
+ok "WEAVE_WS_URL: $FINAL_WS_URL"
+
+# WEAVE_WS_ID
+EXISTING_ID=$(get_env "WEAVE_WS_ID")
+if [ -n "$EXISTING_ID" ]; then
+    echo "  当前 WEAVE_WS_ID: ${EXISTING_ID:0:12}..."
+fi
+echo ""
+echo "  WS ID 是在 Weave 中创建 AI 联系人时生成的标识符。"
+echo "  获取方式: Weave 网站 -> 联系人菜单 -> 添加 AI 联系人 -> 复制 WS ID"
+echo ""
+while true; do
+    read -p "  Weave WS ID: " input_id < /dev/tty
+    if [ -z "$input_id" ]; then
+        if [ -n "$EXISTING_ID" ]; then
+            FINAL_WS_ID="$EXISTING_ID"
+            ok "WEAVE_WS_ID 保留: ${EXISTING_ID:0:12}..."
+            break
+        fi
+        warn "WS ID 不能为空"
+        continue
+    fi
+    set_env "WEAVE_WS_ID" "$input_id"
+    ok "WEAVE_WS_ID 已更新"
+    FINAL_WS_ID="$input_id"
+    break
+done
+
+# WEAVE_API_KEY（可选）
+EXISTING_KEY=$(get_env "WEAVE_API_KEY")
+if [ -n "$EXISTING_KEY" ]; then
+    echo "  当前 WEAVE_API_KEY: ******（已设置）"
+fi
+read -p "  API Key（可选，直接回车跳过）: " input_key < /dev/tty
+if [ -n "$input_key" ]; then
+    set_env "WEAVE_API_KEY" "$input_key"
+    ok "WEAVE_API_KEY 已更新"
+elif [ -n "$EXISTING_KEY" ]; then
+    ok "WEAVE_API_KEY 保留（已设置）"
+else
+    info "跳过 API Key（演示模式，无需认证）"
+fi
+
+echo ""
+
+# ═══════════════════════════════════════════
+# [5/6] 启用插件
+# ═══════════════════════════════════════════
+info "[5/6] 启用插件..."
+
+# 先直接尝试 hermes CLI 启用（不管 list 输出格式）
+if [ -n "$HERMES" ]; then
+    "$HERMES" -p "$SELECTED_PROFILE" plugins enable weave-platform 2>/dev/null && ok "已通过 CLI 启用" || true
+fi
+
+# 验证 config.yaml 中是否已包含 weave-platform
+if grep -q "weave-platform" "$CONFIG_FILE" 2>/dev/null; then
+    ok "config.yaml 中已有 weave-platform"
+elif [ ! -f "$CONFIG_FILE" ]; then
+    # config.yaml 不存在，创建
+    cat > "$CONFIG_FILE" << 'YAML'
+plugins:
+  enabled:
+  - weave-platform
+  disabled: []
+YAML
+    ok "已创建 config.yaml 并启用 weave-platform"
+else
+    # config.yaml 存在但没有 weave-platform，用 Python 修改
+    PY_OK=0
+    "$PYTHON" - << PYEOF 2>/dev/null && PY_OK=1
+import yaml
+config_path = "$CONFIG_FILE"
+try:
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f) or {}
+except Exception:
+    config = {}
+if 'plugins' not in config:
+    config['plugins'] = {'enabled': [], 'disabled': []}
+if 'enabled' not in config['plugins']:
+    config['plugins']['enabled'] = []
+if 'disabled' not in config['plugins']:
+    config['plugins']['disabled'] = []
+if 'weave-platform' not in config['plugins']['enabled']:
+    config['plugins']['enabled'].append('weave-platform')
+    if 'weave-platform' in config['plugins'].get('disabled', []):
+        config['plugins']['disabled'].remove('weave-platform')
+with open(config_path, 'w') as f:
+    yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+print("OK")
+PYEOF
+    if [ "$PY_OK" = "1" ]; then
+        ok "已在 config.yaml 中启用 weave-platform"
+    else
+        # Python 失败（PyYAML 未安装等），用 sed 兜底
+        warn "Python YAML 修改失败，使用 sed 兜底..."
+        if grep -q "^plugins:" "$CONFIG_FILE" 2>/dev/null; then
+            # plugins 节存在
+            if grep -q "enabled: \[\]" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i.bak "s|enabled: \[\]|enabled:\n  - weave-platform|" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
+            elif grep -q "^  enabled:" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i.bak "/^  enabled:/a\\  - weave-platform" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
+            else
+                sed -i.bak "/^plugins:/a\\  enabled:\n  - weave-platform" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
+            fi
+        else
+            # plugins 节不存在，追加
+            echo "" >> "$CONFIG_FILE"
+            echo "plugins:" >> "$CONFIG_FILE"
+            echo "  enabled:" >> "$CONFIG_FILE"
+            echo "  - weave-platform" >> "$CONFIG_FILE"
+            echo "  disabled: []" >> "$CONFIG_FILE"
+        fi
+        # 验证
+        if grep -q "weave-platform" "$CONFIG_FILE" 2>/dev/null; then
+            ok "已通过 sed 在 config.yaml 中启用 weave-platform"
+        else
+            warn "自动修改 config.yaml 失败，请手动添加 weave-platform 到 plugins.enabled"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════
+# [6/6] 完成
+# ═══════════════════════════════════════════
+echo ""
+echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}║          安装完成！                      ║${NC}"
+echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════╝${NC}"
+echo ""
+echo "  配置摘要:"
+echo "    Profile:    $SELECTED_PROFILE"
+echo "    插件路径:   $PLUGIN_DIR"
+echo "    环境变量:   $ENV_FILE"
+echo "    WS URL:     $(get_env WEAVE_WS_URL)"
+echo "    WS ID:      $(get_env WEAVE_WS_ID | cut -c1-12)..."
+echo ""
+echo "    完整连接地址:"
+echo "    $(get_env WEAVE_WS_URL)/api/v1/ai-contacts/ws/agent/$(get_env WEAVE_WS_ID | cut -c1-8)..."
+echo ""
+echo -e "  ${BOLD}下一步${NC}: 重启网关使插件生效"
+echo ""
+echo "    hermes -p $SELECTED_PROFILE gateway run --replace"
+echo ""
+echo "  详细文档: https://www.weaveai.chat/docs/hermes"
+echo ""
